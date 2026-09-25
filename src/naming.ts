@@ -37,6 +37,17 @@ export function sanitizeFilename(name: string): string {
     .trim();
 }
 
+// 文件夹名清洗：非法字符（尤其 "/"）一律替换为 "-"，并去除连续与首尾的 "-"
+export function sanitizeFolderName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/[-. ]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // 单次命名所需的上下文
 export interface NamingContext {
   /** 当前记录的字段值：字段名 -> 展示字符串 */
@@ -54,11 +65,16 @@ const MAX_TEMPLATE_LENGTH = 200;
 /**
  * 根据模板生成目标文件名（不含扩展名部分）。
  * 未识别/已移除的变量会被替换为空串；全部为空时回退为“未命名”。
+ * @param sanitize 可选的文件名/文件夹名清洗函数，默认按文件名清洗（非法字符→_）。
  */
-export function buildBaseName(template: string, ctx: NamingContext): string {
+export function buildBaseName(
+  template: string,
+  ctx: NamingContext,
+  sanitize: (s: string) => string = sanitizeFilename
+): string {
   const { base, ext } = splitFileName(ctx.originalName);
   const trimmed = template.trim();
-  if (!trimmed) return sanitizeFilename(base);
+  if (!trimmed) return sanitize(base);
 
   let out = trimmed;
   const tokenRegex = /\{([^{}]+)\}/g;
@@ -97,8 +113,16 @@ export function buildBaseName(template: string, ctx: NamingContext): string {
   out = out.replace(/[{}]/g, '');
   out = out.replace(/_+$/g, '').replace(/-+$/g, '').replace(/\.+$/g, '');
   out = out.replace(/[_\- ]{2,}/g, ' ');
-  const cleaned = sanitizeFilename(out);
+  const cleaned = sanitize(out);
   return cleaned || '未命名';
+}
+
+/**
+ * 生成文件夹名（按文件夹规则清洗，非法字符→-）。
+ * 直接基于 buildBaseName，仅替换清洗函数。
+ */
+export function buildFolderName(template: string, ctx: NamingContext): string {
+  return buildBaseName(template, ctx, sanitizeFolderName);
 }
 
 /**

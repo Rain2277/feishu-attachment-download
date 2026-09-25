@@ -17,7 +17,7 @@ import {
   IOpenAttachment,
   ITable,
 } from '@lark-base-open/js-sdk';
-import { buildBaseName, makeUniqueName, NamingContext } from './naming';
+import { buildFolderName, makeUniqueName, NamingContext, sanitizeFilename } from './naming';
 
 export interface AttachmentItem {
   originalName: string;
@@ -61,9 +61,10 @@ async function getViewRecordIds(table: ITable): Promise<string[] | null> {
   }
 }
 
-/** 分页读取全部记录，返回 recordId -> 各字段展示字符串 */
+/** 分页读取全部记录，返回 recordId -> 各字段展示字符串（键为字段名） */
 async function readAllFieldStrings(
-  table: ITable
+  table: ITable,
+  fieldIdToName: Record<string, string>
 ): Promise<Record<string, Record<string, string>>> {
   const fieldStrings: Record<string, Record<string, string>> = {};
   let pageToken: string | number | undefined;
@@ -72,7 +73,8 @@ async function readAllFieldStrings(
     for (const rec of page.records) {
       const strings: Record<string, string> = {};
       for (const [fid, raw] of Object.entries(rec.fields ?? {})) {
-        strings[fid] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
+        const name = fieldIdToName[fid] ?? fid;
+        strings[name] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
       }
       fieldStrings[rec.recordId] = strings;
     }
@@ -102,8 +104,11 @@ export async function collectAttachments(
     fieldNameById[id] = meta.name;
   }
 
-  // 记录集合 + 全字段展示值
-  const fieldStrings = await readAllFieldStrings(table);
+  // 记录集合 + 全字段展示值（键为字段名）
+  const allMetas = await table.getFieldMetaList();
+  const fieldIdToName: Record<string, string> = {};
+  allMetas.forEach((m) => (fieldIdToName[m.id] = m.name));
+  const fieldStrings = await readAllFieldStrings(table, fieldIdToName);
   const allRecordIds = Object.keys(fieldStrings);
 
   // 视图范围过滤
@@ -201,9 +206,10 @@ export function triggerDownload(blob: Blob, fileName: string): void {
 /**
  * 执行完整流程：采集 -> 下载 -> 打包 ZIP -> 触发下载。
  *
- * @param template    命名模板（如 {姓名}_{日期}_{序号}）
- * @param scope       记录范围
- * @param onProgress  进度回调
+ * @param attachmentFieldIds 勾选的附件字段 id（只下载这些字段）
+ * @param folderTemplate     每个记录的文件夹命名模板（如 {Existing Application & info}_{Survey date}）
+ * @param scope              记录范围
+ * @param onProgress         进度回调
  */
 export interface RunResult {
   zipName: string;
@@ -212,16 +218,18 @@ export interface RunResult {
   totalBytes: number;
   countByField: Record<string, number>;
   recordCount: number;
+  folderCount: number;
 }
 export async function runDownload(
-  template: string,
+  attachmentFieldIds: string[],
+  folderTemplate: string,
   scope: 'all' | 'view',
   onProgress: (p: ProgressInfo) => void
 ): Promise<RunResult> {
   const table = await bitable.base.getActiveTable();
+  if (!attachmentFieldIds.length) throw new Error('请至少选择一个附件字段');
   const attachmentMeta = await table.getFieldMetaListByType(FieldType.Attachment);
   if (!attachmentMeta.length) throw new Error('当前数据表没有附件字段');
-  const attachmentFieldIds = attachmentMeta.map((m) => m.id);
 
   const { items, countByField, recordCount, fieldStrings } = await collectAttachments(
     table,
@@ -233,47 +241,60 @@ export async function runDownload(
   if (!items.length) throw new Error('所选范围内没有找到附件');
 
   const date = new Date().toISOString().slice(0, 10);
-  const used = new Set<string>();
   const zip = new JSZip();
 
-  // 按字段名汇总附件数量，便于展示
-  const countByName: Record<string, number> = {};
-  const fieldNameById = await (async () => {
-    const map: Record<string, string> = {};
-    for (const id of attachmentFieldIds) {
-      map[id] = (await table.getFieldMetaById(id)).name;
-    }
-    return map;
-  })();
-  Object.entries(countByField).forEach(([id, c]) => {
-    if (c > 0) countByName[fieldNameById[id] ?? id] = c;
-  });
+  // 字段 id -> 字段名（仅本次选中的字段）
+  const fieldNameById: Record<string, string> = {};
+  for (const id of attachmentFieldIds) {
+    fieldNameById[id] = (await table.getFieldMetaById(id)).name;
+  }
 
+  // 按记录分组，保持记录出现顺序；每条记录一个文件夹
+  const groupByRecord = new Map<string, AttachmentItem[]>();
+  for (const item of items) {
+    if (!groupByRecord.has(item.recordId)) groupByRecord.set(item.recordId, []);
+    groupByRecord.get(item.recordId)!.push(item);
+  }
+
+  const usedFolder = new Set<string>();
   let processed = 0;
+  let folderCount = 0;
   const failed: string[] = [];
 
-  for (const [idx, item] of items.entries()) {
-    onProgress({
-      phase: 'downloading',
-      processed,
-      total: items.length,
-      message: `${item.fieldName}/${item.originalName}`,
-    });
-    try {
-      const blob = await downloadBlob(item.url);
-      const ctx: NamingContext = {
-        fieldValues: fieldStrings[item.recordId] ?? {},
-        originalName: item.originalName,
-        index: idx + 1,
-        date,
-      };
-      const base = buildBaseName(template, ctx);
-      const { name } = makeUniqueName(base, item.originalName.split('.').pop() ?? '', used);
-      zip.file(name, blob);
-    } catch (e) {
-      failed.push(`${item.fieldName}/${item.originalName}：${(e as Error).message}`);
+  for (const [recordId, recordItems] of groupByRecord) {
+    const ctx: NamingContext = {
+      fieldValues: fieldStrings[recordId] ?? {},
+      originalName: recordItems[0]?.originalName ?? '',
+      index: processed + 1,
+      date,
+    };
+    // 文件夹名（非法字符 / 等替换为 -），同名记录自动追加 _2/_3
+    const folderBase = buildFolderName(folderTemplate, ctx);
+    const { name: folderName } = makeUniqueName(folderBase, '', usedFolder);
+    const folder = zip.folder(folderName)!;
+    folderCount++;
+
+    // 附件命名：所在字段名称_序号（同记录同字段内序号 1,2,3…）
+    const seqByField: Record<string, number> = {};
+    for (const item of recordItems) {
+      const fieldName = sanitizeFilename(item.fieldName) || item.fieldId;
+      const seq = (seqByField[item.fieldId] = (seqByField[item.fieldId] ?? 0) + 1);
+      onProgress({
+        phase: 'downloading',
+        processed,
+        total: items.length,
+        message: `${folderName}/${fieldName}_${seq}`,
+      });
+      try {
+        const blob = await downloadBlob(item.url);
+        const { ext } = splitName(item.originalName);
+        const targetName = `${fieldName}_${seq}${ext ? `.${ext}` : ''}`;
+        folder.file(targetName, blob);
+      } catch (e) {
+        failed.push(`${folderName}/${item.originalName}：${(e as Error).message}`);
+      }
+      processed++;
     }
-    processed++;
   }
 
   onProgress({ phase: 'zipping', processed, total: items.length, message: '正在生成 ZIP…' });
@@ -285,6 +306,12 @@ export async function runDownload(
 
   onProgress({ phase: 'done', processed: items.length, total: items.length, message: '完成' });
 
+  // 按字段名汇总附件数量（仅选中字段）
+  const countByName: Record<string, number> = {};
+  Object.entries(countByField).forEach(([id, c]) => {
+    if (c > 0) countByName[fieldNameById[id] ?? id] = c;
+  });
+
   return {
     zipName,
     itemCount: items.length,
@@ -292,5 +319,15 @@ export async function runDownload(
     totalBytes: items.reduce((s, it) => s + it.size, 0),
     countByField: countByName,
     recordCount,
+    folderCount,
   };
+}
+
+/** 从文件名拆分出不含扩展名部分与扩展名（无扩展时 ext 为空串） */
+function splitName(fullName: string): { base: string; ext: string } {
+  const lastDot = fullName.lastIndexOf('.');
+  if (lastDot <= 0 || lastDot === fullName.length - 1) {
+    return { base: fullName, ext: '' };
+  }
+  return { base: fullName.slice(0, lastDot), ext: fullName.slice(lastDot + 1) };
 }

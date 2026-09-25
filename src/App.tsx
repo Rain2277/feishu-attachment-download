@@ -6,16 +6,14 @@ import {
   IFieldMeta,
   ITable,
 } from '@lark-base-open/js-sdk';
-import { Phase, ProgressInfo, runDownload, RunResult } from './download';import { buildBaseName, isTemplateTooLong, NamingContext, sanitizeFilename } from './naming';
+import { Phase, ProgressInfo, runDownload, RunResult } from './download';import { buildFolderName, isTemplateTooLong, NamingContext } from './naming';
 
 type Status = 'loading' | 'ready' | 'error';
 
 const TEMPLATE_PRESETS = [
-  { label: '原文件名', insert: '{原文件名}' },
-  { label: '文件名(无扩展)', insert: '{文件名}' },
-  { label: '序号', insert: '{序号}' },
   { label: '日期', insert: '{日期}' },
-  { label: '扩展名', insert: '{扩展名}' },
+  { label: '序号', insert: '{序号}' },
+  { label: '原文件名', insert: '{原文件名}' },
 ];
 
 const PHASE_LABEL: Record<Phase, string> = {
@@ -47,7 +45,7 @@ export default function App() {
   const [allFields, setAllFields] = useState<IFieldMeta[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
 
-  const [template, setTemplate] = useState('{原文件名}');
+  const [folderTemplate, setFolderTemplate] = useState('{Existing Application & info}_{Survey date}');
   const [scope, setScope] = useState<'all' | 'view'>('all');
 
   const [running, setRunning] = useState(false);
@@ -77,11 +75,13 @@ export default function App() {
     })();
   }, []);
 
-  // 实时预览命名效果（读取前若干条记录）
+  // 实时预览文件夹命名效果（读取前若干条记录）
   const refreshPreview = useCallback(async () => {
     if (!tableRef.current) return;
     try {
       const table = tableRef.current;
+      const fieldIdToName: Record<string, string> = {};
+      allFields.forEach((f) => (fieldIdToName[f.id] = f.name));
       const page = await table.getRecordsByPage({ pageSize: 10 });
       const date = new Date().toISOString().slice(0, 10);
       const samples: string[] = [];
@@ -89,16 +89,19 @@ export default function App() {
       for (const rec of page.records) {
         const fieldStrings: Record<string, string> = {};
         for (const [fid, raw] of Object.entries(rec.fields ?? {})) {
-          fieldStrings[fid] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
+          const name = fieldIdToName[fid] ?? fid;
+          fieldStrings[name] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
         }
         // 找第一条附件用于预览
         let originalName = '';
+        let firstFieldName = '';
         for (const fid of selected) {
           try {
             const f = await table.getField(fid);
             const vals = await f.getValue(rec.recordId);
             if (vals && vals.length) {
               originalName = vals[0].name;
+              firstFieldName = fieldIdToName[fid] ?? fid;
               break;
             }
           } catch {
@@ -112,14 +115,14 @@ export default function App() {
           index: ++idx,
           date,
         };
-        samples.push(`${buildBaseName(template, ctx)}  (${originalName})`);
+        samples.push(`${buildFolderName(folderTemplate, ctx)}  / ${firstFieldName}_1`);
         if (samples.length >= 5) break;
       }
       setPreview(samples);
     } catch {
       setPreview([]);
     }
-  }, [selected, template]);
+  }, [selected, folderTemplate, allFields]);
 
   const toggleField = (id: string) => {
     setSelected((prev) =>
@@ -128,11 +131,11 @@ export default function App() {
   };
 
   const insertToken = (token: string) => {
-    setTemplate((prev) => prev + token);
+    setFolderTemplate((prev) => prev + token);
   };
 
   const insertFieldToken = (name: string) => {
-    setTemplate((prev) => prev + `{${name}}`);
+    setFolderTemplate((prev) => prev + `{${name}}`);
   };
 
   const handleDownload = async () => {
@@ -141,8 +144,8 @@ export default function App() {
       setError('请至少选择一个附件字段');
       return;
     }
-    if (isTemplateTooLong(template)) {
-      setError('命名模板过长，请控制在 200 字符以内');
+    if (isTemplateTooLong(folderTemplate)) {
+      setError('文件夹命名模板过长，请控制在 200 字符以内');
       return;
     }
     setRunning(true);
@@ -150,7 +153,7 @@ export default function App() {
     setPreview([]);
     setError(null);
     try {
-      const res = await runDownload(template, scope, (p) => {
+      const res = await runDownload(selected, folderTemplate, scope, (p) => {
         setProgress(p);
       });
       setResult(res);
@@ -205,12 +208,15 @@ export default function App() {
           </section>
 
           <section className="card">
-            <div className="card-title">2. 命名规则</div>
+            <div className="card-title">2. 文件夹命名规则</div>
+            <div className="hint small">
+              每条记录单独一个文件夹，用字段值命名。非法字符（如 /）自动替换为 -
+            </div>
             <input
               className="input"
-              value={template}
-              onChange={(e) => setTemplate(e.target.value)}
-              placeholder="如 {姓名}_{日期}_{序号}"
+              value={folderTemplate}
+              onChange={(e) => setFolderTemplate(e.target.value)}
+              placeholder="如 {Existing Application & info}_{Survey date}"
             />
             <div className="token-row">
               {TEMPLATE_PRESETS.map((p) => (
@@ -230,15 +236,18 @@ export default function App() {
               </div>
             )}
             <div className="hint small">
-              示例：{'{姓名}_{日期}_{序号}'} → 张三_2026-09-24_0001
+              示例：{'{Existing Application & info}_{Survey date}'} → APP123_2026-09-24
+            </div>
+            <div className="hint small">
+              附件命名固定为：所在字段名称_序号（如 附件A_1.jpg、附件A_2.png）
             </div>
             <button className="btn ghost" onClick={refreshPreview} disabled={running}>
-              预览命名（前 5 条）
+              预览文件夹名（前 5 条）
             </button>
             {preview.length > 0 && (
               <ul className="preview">
                 {preview.map((p, i) => (
-                  <li key={i}>{sanitizeFilename(p)}</li>
+                  <li key={i}>{p}</li>
                 ))}
               </ul>
             )}
@@ -277,7 +286,8 @@ export default function App() {
           {result && (
             <div className="alert ok">
               <div className="ok-line">
-                已打包 <b>{result.itemCount}</b> 个附件（约 {formatBytes(result.totalBytes)}），涉及{' '}
+                已打包 <b>{result.itemCount}</b> 个附件（约 {formatBytes(result.totalBytes)}），
+                生成 <b>{result.folderCount}</b> 个文件夹、涉及{' '}
                 <b>{result.recordCount}</b> 条记录 → <b>{result.zipName}</b>
               </div>
               {Object.keys(result.countByField).length > 0 && (
