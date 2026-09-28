@@ -17,7 +17,7 @@ import {
   IOpenAttachment,
   ITable,
 } from '@lark-base-open/js-sdk';
-import { buildFolderName, makeUniqueName, NamingContext, sanitizeFilename } from './naming';
+import { buildFolderName, formatCellValue, makeUniqueName, NamingContext, sanitizeFilename } from './naming';
 
 export interface AttachmentItem {
   originalName: string;
@@ -64,7 +64,7 @@ async function getViewRecordIds(table: ITable): Promise<string[] | null> {
 /** 分页读取全部记录，返回 recordId -> 各字段展示字符串（键为字段名） */
 async function readAllFieldStrings(
   table: ITable,
-  fieldIdToName: Record<string, string>
+  fieldIdToMeta: Record<string, { name: string; type: number }>
 ): Promise<Record<string, Record<string, string>>> {
   const fieldStrings: Record<string, Record<string, string>> = {};
   let pageToken: string | number | undefined;
@@ -73,8 +73,9 @@ async function readAllFieldStrings(
     for (const rec of page.records) {
       const strings: Record<string, string> = {};
       for (const [fid, raw] of Object.entries(rec.fields ?? {})) {
-        const name = fieldIdToName[fid] ?? fid;
-        strings[name] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
+        const meta = fieldIdToMeta[fid];
+        const name = meta?.name ?? fid;
+        strings[name] = formatCellValue(raw, meta?.type);
       }
       fieldStrings[rec.recordId] = strings;
     }
@@ -106,9 +107,9 @@ export async function collectAttachments(
 
   // 记录集合 + 全字段展示值（键为字段名）
   const allMetas = await table.getFieldMetaList();
-  const fieldIdToName: Record<string, string> = {};
-  allMetas.forEach((m) => (fieldIdToName[m.id] = m.name));
-  const fieldStrings = await readAllFieldStrings(table, fieldIdToName);
+  const fieldIdToMeta: Record<string, { name: string; type: number }> = {};
+  allMetas.forEach((m) => (fieldIdToMeta[m.id] = { name: m.name, type: m.type }));
+  const fieldStrings = await readAllFieldStrings(table, fieldIdToMeta);
   const allRecordIds = Object.keys(fieldStrings);
 
   // 视图范围过滤

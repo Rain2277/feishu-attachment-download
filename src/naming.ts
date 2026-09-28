@@ -153,3 +153,41 @@ export function makeUniqueName(
 export function isTemplateTooLong(template: string): boolean {
   return template.length > MAX_TEMPLATE_LENGTH;
 }
+
+/**
+ * 把飞书多维表格单元格原始值转成可读字符串，用于命名模板。
+ * - 文本段/单选/多选/人员等对象数组：提取 text/name 等字段，顿号连接
+ * - 日期字段（fieldType=5，毫秒时间戳）：格式化为 YYYY-MM-DD
+ * - 数字/布尔：直接转字符串
+ */
+export function formatCellValue(raw: unknown, fieldType?: number): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number') {
+    if (fieldType === 5) {
+      const d = new Date(raw);
+      if (isNaN(d.getTime())) return String(raw);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
+    return String(raw);
+  }
+  if (typeof raw === 'boolean') return raw ? '是' : '否';
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => formatCellValue(item, fieldType))
+      .filter(Boolean)
+      .join('、');
+  }
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    for (const key of ['text', 'name', 'enName', 'value', 'title', 'fullName']) {
+      const v = obj[key];
+      if (typeof v === 'string' && v) return v;
+    }
+    return '';
+  }
+  return String(raw);
+}

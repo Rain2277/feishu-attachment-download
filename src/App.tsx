@@ -6,7 +6,7 @@ import {
   IFieldMeta,
   ITable,
 } from '@lark-base-open/js-sdk';
-import { Phase, ProgressInfo, runDownload, RunResult } from './download';import { buildFolderName, isTemplateTooLong, NamingContext } from './naming';
+import { Phase, ProgressInfo, runDownload, RunResult } from './download';import { buildFolderName, formatCellValue, isTemplateTooLong, NamingContext } from './naming';
 
 type Status = 'loading' | 'ready' | 'error';
 
@@ -80,8 +80,8 @@ export default function App() {
     if (!tableRef.current) return;
     try {
       const table = tableRef.current;
-      const fieldIdToName: Record<string, string> = {};
-      allFields.forEach((f) => (fieldIdToName[f.id] = f.name));
+      const fieldIdToMeta: Record<string, { name: string; type: number }> = {};
+      allFields.forEach((f) => (fieldIdToMeta[f.id] = { name: f.name, type: f.type }));
       const page = await table.getRecordsByPage({ pageSize: 10 });
       const date = new Date().toISOString().slice(0, 10);
       const samples: string[] = [];
@@ -89,8 +89,9 @@ export default function App() {
       for (const rec of page.records) {
         const fieldStrings: Record<string, string> = {};
         for (const [fid, raw] of Object.entries(rec.fields ?? {})) {
-          const name = fieldIdToName[fid] ?? fid;
-          fieldStrings[name] = Array.isArray(raw) ? raw.join('、') : String(raw ?? '');
+          const meta = fieldIdToMeta[fid];
+          const name = meta?.name ?? fid;
+          fieldStrings[name] = formatCellValue(raw, meta?.type);
         }
         // 找第一条附件用于预览
         let originalName = '';
@@ -101,7 +102,7 @@ export default function App() {
             const vals = await f.getValue(rec.recordId);
             if (vals && vals.length) {
               originalName = vals[0].name;
-              firstFieldName = fieldIdToName[fid] ?? fid;
+              firstFieldName = fieldIdToMeta[fid]?.name ?? fid;
               break;
             }
           } catch {
